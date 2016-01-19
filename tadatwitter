@@ -1,0 +1,84 @@
+#!/usr/bin/perl -w
+use strict;
+use Text::Diff;
+use LWP::Simple;
+use Encode;
+use MIME::Lite;
+use HTML::Entities;
+use Digest::MD5 qw(md5_hex);
+use Sys::Hostname;
+
+if ($#ARGV < 1) {
+    print "usage: $0 'username mail-dest [mail-replyTo]'\n";
+    exit 1;
+}
+
+my $tweeto = "$ARGV[0]";
+my $to = "$ARGV[1]";
+my $replyTo = $to;
+
+if($ARGV[2]) {
+    $replyTo = "$ARGV[2]";
+}
+
+my $debug = 0;
+my $filename = md5_hex($tweeto);
+my ($dirpath) = (__FILE__ =~ m{^(.*/)?.*}s);
+my $db = "${dirpath}$filename.db";
+
+my $tweets = get("https://twitter.com/$tweeto") or die;
+
+my @items = split(m!data-tweet-id!, $tweets);
+my $news = '';
+my %tweets;
+
+my $i=0;
+foreach my $item (@items) {
+    if($item =~ m!data-permalink-path="(.*?/status/.*?)".*?<p class=".*?js-tweet-text.*?>(.*?)</p>!s) {
+        my $content = $2;
+        my $permalink = 'https://twitter.com'.$1;
+        $content =~ s!<a href="http://t\.co/.*?data-expanded-url="(.*?)".*?</a>!$1!g;
+        $content =~ s!<.+?>!!g;
+        $permalink =~ m!https://twitter\.com/(\w+)/status/(\d+)!;
+        my $uid = "$1/$2";
+        $tweets{$uid}{'by'}= $1;
+        $tweets{$uid}{'tweet'}= decode_entities($content);
+        $tweets{$uid}{'url'}= decode_entities($permalink);
+        $news .= $uid."\n";
+    } else {
+        print "nok..\n" if $debug eq '1';
+    }
+}
+
+die $news if $debug;
+die "counld't find any tweeet. debug: \n".$tweets if $news eq '';
+
+my $fh;
+my $before;
+open $fh, '+>>', "$db" or die "Cannot open $db";
+seek($fh, 0, 0);
+{
+    local $/;
+    $before = <$fh>;
+}
+truncate($fh, 0);
+print $fh $news;
+close $fh;
+
+my $diff = diff \$before, \$news, { STYLE => "Unified" };
+my @diff = split(/\n/, $diff);
+
+foreach my $out (@diff) {
+    if($out =~ m!^\+(.*)!) {
+
+        my $msg = MIME::Lite->new(
+            From        => $tweeto.' <bot+twitter@'.hostname.'>',
+            To          => "$to",
+            'Reply-To'  => "$replyTo",
+            Subject     => encode('MIME-Header',$tweets{$1}{'by'}.": ".$tweets{$1}{'tweet'}),
+            Type        => 'text/plain; charset=UTF-8',
+            Data        => encode('utf-8',"$tweets{$1}{'tweet'}\n\n$tweets{$1}{'url'}"),
+        );
+        $msg->send;
+    }
+}

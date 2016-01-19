@@ -1,0 +1,92 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+
+use Text::Diff;
+use LWP::Simple;
+use HTML::Strip;
+use Digest::MD5 qw(md5_hex);
+use Encode;
+use MIME::Lite;
+use HTML::Entities;
+use Sys::Hostname;
+use Data::Dumper;
+
+if ($#ARGV < 1) {
+    print "usage: $0 'dept mail-dest [mail-replyTo]'\n";
+    exit 1;
+}
+
+my $dept = "$ARGV[0]";
+my $to = "$ARGV[1]";
+my $replyTo = $to;
+
+if($ARGV[2]) {
+    $replyTo = "$ARGV[2]";
+}
+
+# http://vigilance.meteofrance.com/js/lire_nxfr33.js
+# var coul_vigi=["nul"," pas de vigilance particuli&egrave;re."," jaune"," orange"," rouge"   ]
+# var risque_vigi=["nul","Vent&nbsp;violent", "Pluie-inondation","Orages","Inondation","Neige-verglas","Canicule","Grand-froid","Avalanches","Vagues-submersion"]
+
+my @coul_vigi= ("nul","pas de vigilance particuliere","vigilance jaune ","vigilance orange ","vigilance rouge ");
+my @risque_vigi=("nul","Vent violent", "Pluie-inondation","Orages","Inondation","Neige-verglas","Canicule","Grand-froid","Avalanches","Vagues-submersion");
+
+my $url = "http://vigilance.meteofrance.com/data/NXFR33_LFPW_.xml";
+my $filename = md5_hex($url.$dept);
+my ($dirpath) = (__FILE__ =~ m{^(.*/)?.*}s);
+my $db = "${dirpath}$filename.db";
+
+my $now = get("$url") or die "cannot access to $url";
+
+my %vigi;
+my @vigi = split /DV/, $now;
+
+foreach my $dv (@vigi)
+{
+    if($dv =~ /dep="(..)".*?coul="(.)"(.*)$/xs)
+    {
+        my $dep = $1;
+        $vigi{$dep}{couleur} = $2;
+        $vigi{$dep}{risques} = [];
+
+        my @risques = split /risque/, $3;
+        foreach my $risque (@risques)
+        {
+            if($risque =~ /val="(.)"/)
+            {
+                push $vigi{$dep}{risques}, $risque_vigi[$1];
+            }
+        }
+    }
+}
+
+my $subject = $coul_vigi[$vigi{$dept}{couleur}].join(' + ',@{$vigi{$dept}{risques}})." pour le ".$dept;
+$now = $subject."\n\nhttp://vigilance.meteofrance.com\n";
+
+my $fh;
+my $before;
+open $fh, '+>>', "$db" or die "Cannot open $db";
+binmode($fh, ":utf8");
+seek($fh, 0, 0);
+{
+    local $/;
+    $before = <$fh>;
+}
+truncate($fh, 0);
+print $fh $now;
+close $fh;
+
+my $diff = diff \$before, \$now, { STYLE => "Unified" };
+if($diff ne '')
+{
+    my $msg = MIME::Lite->new(
+    From        => "bot+vigimeteo".'@'.hostname,
+    To          => "$to",
+    'Reply-To'  => "$replyTo",
+    Subject     => encode('MIME-Header', $subject),
+    Type        => 'text/plain',
+    Data        => encode('utf-8', "$now"),
+    );
+    $msg->send;
+}

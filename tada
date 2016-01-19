@@ -1,0 +1,62 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+
+use Text::Diff;
+use LWP::Simple;
+use HTML::Strip;
+use Digest::MD5 qw(md5_hex);
+use Encode;
+use MIME::Lite;
+use HTML::Entities;
+use Sys::Hostname;
+
+if ($#ARGV < 1) {
+    print "usage: $0 'url mail-dest [mail-replyTo]'\n";
+    exit 1;
+}
+
+my $url = "$ARGV[0]";
+my $to = "$ARGV[1]";
+my $replyTo = $to;
+
+if($ARGV[2]) {
+    $replyTo = "$ARGV[2]";
+}
+
+my $filename = md5_hex($url);
+my ($dirpath) = (__FILE__ =~ m{^(.*/)?.*}s);
+my $db = "${dirpath}$filename.db";
+
+my $now = get("$url") or die "cannot access to $url";
+
+my $p = HTML::Strip->new();
+$now = $p->parse($now); # Clean html tags
+$now = decode_entities($now);
+
+my $fh;
+my $before;
+open $fh, '+>>', "$db" or die "Cannot open $db";
+binmode($fh, ":utf8");
+seek($fh, 0, 0);
+{
+    local $/;
+    $before = <$fh>;
+}
+truncate($fh, 0);
+print $fh $now;
+close $fh;
+
+my $diff = diff \$before, \$now, { STYLE => "Unified" };
+if($diff ne '')
+{
+    my $msg = MIME::Lite->new(
+    From        => "bot+tada.$filename".'@'.hostname,
+    To          => "$to",
+    'Reply-To'  => "$replyTo",
+    Subject     => encode('MIME-Header', "tada: $url"),
+    Type        => 'text/plain',
+    Data        => encode('utf-8', "$diff\n\nsource: $url"),
+    );
+    $msg->send;
+}
